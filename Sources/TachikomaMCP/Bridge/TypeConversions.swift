@@ -70,7 +70,7 @@ extension Value {
             .object(dict.mapValues { Value.from($0) })
         case is NSNull:
             .null
-        default:
+       default:
             // Fallback: convert to string representation
             .string(String(describing: any))
         }
@@ -131,11 +131,15 @@ extension ToolResponse {
             case let .image(data, mimeType, _):
                 // For images, return a descriptive string
                 return AnyAgentToolValue(string: "[Image: \(mimeType), size: \(data.count) bytes]")
-            case let .resource(uri, _, text):
-                // For resources, return the text content if available
-                return AnyAgentToolValue(string: text ?? "[Resource: \(uri)]")
+            case let .resource(resourceValue, secondValue, thirdValue):
+                return Self.resourceSummary(
+                    resourceValue: resourceValue,
+                    secondValue: secondValue,
+                    thirdValue: thirdValue)
             case let .audio(data, mimeType):
                 return AnyAgentToolValue(string: "[Audio: \(mimeType), size: \(data.count) bytes]")
+            default:
+                return AnyAgentToolValue(string: String(describing: firstContent))
             }
         }
 
@@ -180,22 +184,99 @@ extension ToolResponse {
                 "mimeType": AnyAgentToolValue(string: mimeType),
                 "data": AnyAgentToolValue(string: data),
             ])
-        case let .resource(uri, mimeType, text):
-            var resourceDict: [String: AnyAgentToolValue] = [
-                "type": AnyAgentToolValue(string: "resource"),
-                "uri": AnyAgentToolValue(string: uri),
-                "mimeType": AnyAgentToolValue(string: mimeType),
-            ]
-            if let text {
-                resourceDict["text"] = AnyAgentToolValue(string: text)
-            }
-            return AnyAgentToolValue(object: resourceDict)
+        case let .resource(resourceValue, secondValue, thirdValue):
+            return Self.resourceObject(
+                resourceValue: resourceValue,
+                secondValue: secondValue,
+                thirdValue: thirdValue)
         case let .audio(data, mimeType):
             return AnyAgentToolValue(object: [
                 "type": AnyAgentToolValue(string: "audio"),
                 "mimeType": AnyAgentToolValue(string: mimeType),
                 "data": AnyAgentToolValue(string: data),
             ])
+        default:
+            return AnyAgentToolValue(string: String(describing: content))
         }
+    }
+
+    private static func resourceSummary<ResourceValue, SecondValue, ThirdValue>(
+        resourceValue: ResourceValue,
+        secondValue: SecondValue,
+        thirdValue: ThirdValue
+    ) -> AnyAgentToolValue {
+        let details = self.parseResourceDetails(
+            resourceValue: resourceValue,
+            secondValue: secondValue,
+            thirdValue: thirdValue)
+        return AnyAgentToolValue(string: details.text ?? "[Resource: \(details.uri)]")
+    }
+
+    private static func resourceObject<ResourceValue, SecondValue, ThirdValue>(
+        resourceValue: ResourceValue,
+        secondValue: SecondValue,
+        thirdValue: ThirdValue
+    ) -> AnyAgentToolValue {
+        let details = self.parseResourceDetails(
+            resourceValue: resourceValue,
+            secondValue: secondValue,
+            thirdValue: thirdValue)
+
+        var resourceDict: [String: AnyAgentToolValue] = [
+            "type": AnyAgentToolValue(string: "resource"),
+            "uri": AnyAgentToolValue(string: details.uri),
+        ]
+        if let mimeType = details.mimeType {
+            resourceDict["mimeType"] = AnyAgentToolValue(string: mimeType)
+        } else {
+            resourceDict["mimeType"] = AnyAgentToolValue(null: ())
+        }
+        if let text = details.text {
+            resourceDict["text"] = AnyAgentToolValue(string: text)
+        } else {
+            resourceDict["text"] = AnyAgentToolValue(null: ())
+        }
+        if let blob = details.blob {
+            resourceDict["blob"] = AnyAgentToolValue(string: blob)
+        }
+        return AnyAgentToolValue(object: resourceDict)
+    }
+
+    private static func parseResourceDetails<ResourceValue, SecondValue, ThirdValue>(
+        resourceValue: ResourceValue,
+        secondValue: SecondValue,
+        thirdValue: ThirdValue
+    ) -> (uri: String, mimeType: String?, text: String?, blob: String?) {
+        // MCP 0.10.x exposes `.resource(uri:mimeType:text:)` while 0.11.x exposes
+        // `.resource(resource: Resource.Content, annotations:..., _meta:...)`.
+        if let uri = resourceValue as? String {
+            return (
+                uri: uri,
+                mimeType: secondValue as? String,
+                text: thirdValue as? String,
+                blob: nil
+            )
+        }
+
+        return (
+            uri: self.extractStringProperty(named: "uri", from: resourceValue) ?? "[resource]",
+            mimeType: self.extractStringProperty(named: "mimeType", from: resourceValue),
+            text: self.extractStringProperty(named: "text", from: resourceValue),
+            blob: self.extractStringProperty(named: "blob", from: resourceValue)
+        )
+    }
+
+    private static func extractStringProperty<Value>(named name: String, from value: Value) -> String? {
+        for child in Mirror(reflecting: value).children {
+            guard child.label == name else { continue }
+            return self.unwrapOptional(child.value) as? String
+        }
+        return nil
+    }
+
+    private static func unwrapOptional(_ value: Any) -> Any? {
+        let mirror = Mirror(reflecting: value)
+        guard mirror.displayStyle == .optional else { return value }
+        return mirror.children.first?.value
     }
 }
